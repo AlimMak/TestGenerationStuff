@@ -42,7 +42,12 @@ class LLM:
         )
         self.input_tokens += resp.usage.input_tokens
         self.output_tokens += resp.usage.output_tokens
-        return _strip_fences(resp.content[0].text)
+        # The response may contain non-text blocks (e.g. a thinking block) before
+        # the text, so join every text block rather than assuming content[0].
+        text = "\n".join(
+            b.text for b in resp.content if getattr(b, "type", None) == "text"
+        )
+        return _strip_fences(text)
 
 
 # Scripted responses used only in mock mode, so the agent loop can be exercised
