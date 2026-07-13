@@ -14,7 +14,7 @@ from .llm import LLM
 
 
 def _print_event(kind: str, i: int, msg: str) -> None:
-    tag = {"act": "->", "observe": "..", "done": "**"}.get(kind, "  ")
+    tag = {"act": "->", "observe": "..", "done": "**", "bug": "!!"}.get(kind, "  ")
     print(f"  [iter {i}] {tag} {msg}")
 
 
@@ -58,13 +58,17 @@ def main(argv: list[str] | None = None) -> int:
     with open(out, "w") as f:
         f.write(loop.tests)
 
-    status = "SUCCESS" if loop.succeeded else "INCOMPLETE"
+    status = {"success": "SUCCESS", "bug_found": "BUG FOUND",
+              "incomplete": "INCOMPLETE"}[loop.outcome]
     print(f"\n{status} after {loop.iterations} iteration(s)")
+    if loop.outcome == "bug_found":
+        print(f"  source bug: {loop.bug_reason}")
+        print(f"  the failing test is kept in {out}, marked with # SOURCE BUG")
     print(f"  {loop.result.passed} passed, {loop.result.failed} failed, "
           f"{loop.result.coverage}% coverage")
     print(f"  tokens: {llm.input_tokens} in / {llm.output_tokens} out")
     print(f"  tests written to {out}")
-    return 0 if loop.succeeded else 1
+    return {"success": 0, "bug_found": 2, "incomplete": 1}[loop.outcome]
 
 
 if __name__ == "__main__":

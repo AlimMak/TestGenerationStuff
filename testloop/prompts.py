@@ -23,12 +23,19 @@ Write a thorough pytest suite for the public functions. Output only the test cod
 
 REPAIR_SYSTEM = """You are a pytest repair and coverage engine.
 Output rules (strict):
-- Output ONLY the full, updated Python test file. No fences, no commentary.
+- Normally, output ONLY the full, updated Python test file. No fences, no commentary.
 - Keep tests that already pass.
-- If a test fails because the SOURCE is buggy (not the test), keep the correct
-  assertion and put a comment `# SOURCE BUG:` on the line above it.
 - Add new tests to exercise the uncovered lines listed below.
 - Tests must stay deterministic.
+- Do NOT weaken or rewrite an assertion just to make a failing test pass.
+
+Source bug handling:
+- If a test fails because the SOURCE CODE under test is genuinely wrong (its
+  behavior is incorrect, not the test), do NOT change the test to accept the
+  wrong behavior. Instead make the FIRST line of your reply exactly:
+      TESTLOOP_SOURCE_BUG: <one sentence naming the bug and the correct behavior>
+  Then, on the following lines, output the full test file, keeping the correct
+  (failing) assertion with a `# SOURCE BUG:` comment on the line above it.
 """
 
 REPAIR_USER = """Source (target.py):
