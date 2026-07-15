@@ -19,22 +19,25 @@ the model guessing.
 ```bash
 pip install pytest pytest-cov anthropic
 export ANTHROPIC_API_KEY=sk-...
-python -m testloop example_target.py --coverage 90 --max-iters 5
+python -m testloop examples/example_target.py --coverage 90 --max-iters 5
 ```
 
 Offline demo with no API key (uses scripted responses):
 
 ```bash
-python -m testloop example_target.py --mock
+python -m testloop examples/example_target.py --mock
 ```
 
 ## Architecture
 
 - `runner.py` runs generated tests in a fresh temp dir inside a subprocess with
-  a hard timeout, then parses structured results from pytest-json-report and
-  coverage.py. Returns pass/fail counts, coverage percent, and the exact
+  a hard timeout, then parses structured results from pytest's built-in JUnit XML
+  and coverage.py. Returns pass/fail counts, coverage percent, and the exact
   uncovered line numbers.
-- `agent.py` is the loop: generate, run, observe, repair, stop on success.
+- `agent.py` is the loop: generate, run, observe, repair, stop on success. It
+  also distinguishes "the test is wrong" from "the source has a bug": when the
+  model signals a genuine defect with a `TESTLOOP_SOURCE_BUG` marker, the loop
+  stops and surfaces it as a finding instead of contorting the tests to pass.
 - `llm.py` wraps the Anthropic SDK, tracks token usage, and has a mock mode.
 - `prompts.py` holds the generate and repair prompts (the main tuning surface).
 - `cli.py` is the entry point.
@@ -73,7 +76,6 @@ point.
 
 - Non-root container user and a read-only source mount
 - Coverage-guided repair that targets specific uncovered branches, not just lines
-- Distinguish "the test is wrong" from "the source has a bug" and surface both
 - Multi-file / whole-repo mode
 - Cost estimation from token counts
 - A GitHub Action that runs the loop on new PRs
