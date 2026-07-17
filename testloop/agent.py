@@ -28,7 +28,7 @@ class LoopResult:
     tests: str
     result: RunResult
     iterations: int
-    outcome: str                 # "success" | "bug_found" | "incomplete"
+    outcome: str                 # "success" | "bug_found" | "incomplete" | "regressed"
     input_tokens: int
     output_tokens: int
     bug_reason: str | None = None
@@ -99,10 +99,18 @@ def generate_tests(
     """
     tests = ""
     result = RunResult()
+    # Regression tracking: keep the last known-good state so we can revert to it
+    # and re-prompt when the model deletes tests instead of fixing them.
+    prev_tests: str = ""
+    prev_result: RunResult = RunResult()
+    prev_test_count: int = 0
+    consecutive_regressions: int = 0
+    regression_note: str | None = None
 
     for i in range(1, max_iterations + 1):
         bug_reason = None
         import_contract = prompts._import_contract(module_dotted)
+
         if i == 1:
             on_event("act", i, "generating initial tests")
             tests = llm.complete(
@@ -111,14 +119,24 @@ def generate_tests(
             )
         else:
             on_event("act", i, "repairing tests")
-            # When pytest could not collect any tests (e.g. ImportError in the
-            # test file), prepend an explicit label so the model knows no tests
-            # ran — it must fix the imports before worrying about assertions.
-            repair_output = (
-                "[COLLECTION ERROR — pytest could not import the test module. "
-                "No tests ran. The import statements are wrong; fix them first.]\n"
-                + result.output
-            ) if result.collection_error else result.output
+            # Determine what output and context to pass to the repair prompt.
+            # Priority: regression note > collection error > normal output.
+            # On regression we show the previous (non-regressed) run's output so
+            # the context is consistent with the reverted test file.
+            if regression_note:
+                repair_ctx = prev_result
+                repair_output = regression_note + "\n" + prev_result.output
+            elif result.collection_error:
+                repair_ctx = result
+                repair_output = (
+                    "[COLLECTION ERROR — pytest could not import the test module. "
+                    "No tests ran. The import statements are wrong; fix them first.]\n"
+                    + result.output
+                )
+            else:
+                repair_ctx = result
+                repair_output = result.output
+
             raw = llm.complete(
                 prompts.REPAIR_SYSTEM.format(import_contract=import_contract),
                 prompts.REPAIR_USER.format(
@@ -126,9 +144,9 @@ def generate_tests(
                     module_dotted=module_dotted,
                     tests=tests,
                     output=repair_output,
-                    coverage=result.coverage,
+                    coverage=repair_ctx.coverage,
                     target=coverage_target,
-                    uncovered=result.uncovered_lines,
+                    uncovered=repair_ctx.uncovered_lines,
                 ),
             )
             bug_reason, tests = _extract_bug(raw)
@@ -140,6 +158,7 @@ def generate_tests(
             module_dotted=module_dotted,
             package_files=package_files,
         )
+
         if result.collection_error:
             on_event("observe", i, "collection error (no tests ran — import failed)")
         else:
@@ -148,6 +167,37 @@ def generate_tests(
                 f"{result.passed} passed, {result.failed} failed, "
                 f"{result.coverage}% coverage",
             )
+
+        # Regression guard: repair produced a suite with fewer tests than the
+        # previous iteration.  The model deleted failing tests instead of fixing
+        # them.  Revert to the last known-good tests and re-prompt with an
+        # explicit rejection note.  Two consecutive regressions → "regressed".
+        if i > 1 and result.collected and result.total < prev_test_count:
+            removed = prev_test_count - result.total
+            consecutive_regressions += 1
+            on_event(
+                "regress", i,
+                f"{removed} test(s) deleted — reverting to previous suite",
+            )
+            regression_note = (
+                f"[REGRESSION — your last submission had {result.total} test(s), "
+                f"down from {prev_test_count}. Tests were removed to avoid failures. "
+                f"That is not allowed. The suite shown below is restored to its state "
+                f"before your last change. Fix the {prev_result.failed} failing "
+                f"test(s) without removing or weakening any assertion.]"
+            )
+            tests = prev_tests  # revert
+            if consecutive_regressions >= 2:
+                return LoopResult(prev_tests, prev_result, i, "regressed",
+                                  llm.input_tokens, llm.output_tokens)
+            continue  # skip success/bug checks — retry with regression note
+
+        # Non-regressing iteration: reset tracking state.
+        consecutive_regressions = 0
+        regression_note = None
+        prev_tests = tests
+        prev_test_count = result.total
+        prev_result = result
 
         # A source bug requires real test execution: collection must have succeeded
         # and at least one test must have run and failed.  A collection error or

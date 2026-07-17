@@ -60,6 +60,9 @@ Output rules (strict):
 - Add new tests to exercise the uncovered lines listed below.
 - Tests must stay deterministic.
 - Do NOT weaken or rewrite an assertion just to make a failing test pass.
+- NEVER delete a failing test. If a test fails because the SOURCE is wrong,
+  keep it and use the TESTLOOP_SOURCE_BUG marker (see below).
+  Deleting or skipping tests to reduce the failure count is not acceptable.
 
 Source bug handling:
 - If a test fails because the SOURCE CODE under test is genuinely wrong (its

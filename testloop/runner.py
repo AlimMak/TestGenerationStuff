@@ -50,6 +50,11 @@ class RunResult:
     timed_out: bool = False
 
     @property
+    def total(self) -> int:
+        """Total number of test items that executed (passed + failed + errors)."""
+        return self.passed + self.failed + self.errors
+
+    @property
     def all_passed(self) -> bool:
         return self.collected and self.failed == 0 and self.errors == 0 and self.passed > 0
 

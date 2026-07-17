@@ -196,6 +196,66 @@ def test_bug_found_not_triggered_on_collection_error():
     assert loop.outcome != "bug_found"
 
 
+# ─── Regression guard ────────────────────────────────────────────────────────
+
+# Sentinels for regression tests.
+# INIT_FAIL: first run — 28 tests (24 passing, 4 failing), below coverage target.
+INIT_FAIL = RunResult(passed=24, failed=4, errors=0, collected=True, coverage=70.0)
+# REGRESSED: model deleted the 4 failing tests instead of fixing them.
+REGRESSED = RunResult(passed=14, failed=0, errors=0, collected=True, coverage=90.0)
+# REPAIRED: model fixed the 4 failing tests; full suite of 28 now passes.
+REPAIRED  = RunResult(passed=28, failed=0, errors=0, collected=True, coverage=90.0)
+
+
+def test_regression_not_treated_as_success():
+    """A repaired suite with fewer tests than before must not produce 'success',
+    even if all remaining tests pass and coverage meets the target."""
+    llm = _llm([STUB_TESTS, STUB_TESTS, STUB_TESTS])
+    with patch("testloop.agent.run_tests", side_effect=[INIT_FAIL, REGRESSED, REPAIRED]):
+        loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+    # Regression at iter 2 is rejected; success only arrives at iter 3.
+    assert loop.outcome == "success"
+    assert loop.iterations == 3
+
+
+def test_two_consecutive_regressions_return_regressed():
+    """Two consecutive regressions halt the loop with outcome 'regressed'."""
+    llm = _llm([STUB_TESTS, STUB_TESTS, STUB_TESTS])
+    with patch("testloop.agent.run_tests", side_effect=[INIT_FAIL, REGRESSED, REGRESSED]):
+        loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+    assert loop.outcome == "regressed"
+    assert loop.iterations == 3
+
+
+def test_regression_note_injected_into_next_repair_prompt():
+    """After a regression the next repair user-prompt contains [REGRESSION ...]."""
+    captured_users: list[str] = []
+
+    def spy_complete(system: str, user: str) -> str:
+        captured_users.append(user)
+        return STUB_TESTS
+
+    llm = _llm([STUB_TESTS])
+    with patch("testloop.agent.run_tests", side_effect=[INIT_FAIL, REGRESSED, REPAIRED]):
+        with patch.object(llm, "complete", side_effect=spy_complete):
+            generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+
+    # captured_users: [generate(1), repair(2), repair-with-regression-note(3)]
+    assert len(captured_users) == 3
+    assert "[REGRESSION" in captured_users[2]
+
+
+def test_regression_resets_on_non_regressing_iteration():
+    """A regression followed by a correct repair does not leave the loop stuck."""
+    llm = _llm([STUB_TESTS, STUB_TESTS, STUB_TESTS, STUB_TESTS])
+    # iter 1: fail, iter 2: regress, iter 3: regress again → "regressed"
+    # But here iter 3 fixes it → should succeed at iter 3.
+    with patch("testloop.agent.run_tests",
+               side_effect=[INIT_FAIL, REGRESSED, REPAIRED]):
+        loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+    assert loop.outcome == "success"
+
+
 # ─── Outcome: incomplete ──────────────────────────────────────────────────────
 
 def test_incomplete_when_max_iterations_exhausted():

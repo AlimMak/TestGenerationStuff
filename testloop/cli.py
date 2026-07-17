@@ -16,7 +16,7 @@ from .llm import LLM
 
 
 def _print_event(kind: str, i: int, msg: str) -> None:
-    tag = {"act": "->", "observe": "..", "done": "**", "bug": "!!"}.get(kind, "  ")
+    tag = {"act": "->", "observe": "..", "done": "**", "bug": "!!", "regress": "!!"}.get(kind, "  ")
     print(f"  [iter {i}] {tag} {msg}")
 
 
@@ -24,6 +24,7 @@ def _print_event(kind: str, i: int, msg: str) -> None:
 
 _COL_MODULE = 30
 _COL_STATUS = 12
+_COL_TESTS  =  7
 _COL_COV    = 10
 _COL_ITERS  =  7
 _COL_TOKENS =  9
@@ -32,16 +33,18 @@ _STATUS_LABELS = {
     "success":    "SUCCESS",
     "bug_found":  "BUG FOUND",
     "incomplete": "INCOMPLETE",
+    "regressed":  "REGRESSED",
     "error":      "ERROR",
 }
 
 
-def _fmt_row(module: str, status: str, cov: str, iters: str, tokens: str) -> str:
+def _fmt_row(module: str, status: str, tests: str, cov: str, iters: str, tokens: str) -> str:
     if len(module) > _COL_MODULE:
         module = "..." + module[-(_COL_MODULE - 3):]
     return (
         f"{module:<{_COL_MODULE}} "
         f"{status:<{_COL_STATUS}} "
+        f"{tests:>{_COL_TESTS}} "
         f"{cov:>{_COL_COV}} "
         f"{iters:>{_COL_ITERS}} "
         f"{tokens:>{_COL_TOKENS}}"
@@ -53,24 +56,28 @@ def _print_summary(
     budget_hit: bool = False,
     skipped: int = 0,
 ) -> None:
-    header = _fmt_row("Module", "Status", "Coverage", "Iters", "Tokens")
+    header = _fmt_row("Module", "Status", "Tests", "Coverage", "Iters", "Tokens")
     sep = "-" * len(header)
     print(f"\n{header}")
     print(sep)
 
     pass_count = 0
+    total_tests = 0
     total_iters = 0
     total_tokens = 0
     cov_values: list[float] = []
 
     for r in rows:
         status = _STATUS_LABELS.get(r["status"], r["status"].upper())
+        tests  = str(r["tests"])         if r.get("tests")    is not None else "-"
         cov    = f"{r['coverage']:.1f}%" if r.get("coverage") is not None else "-"
         iters  = str(r["iters"])         if r.get("iters")    is not None else "-"
         tokens = str(r["tokens"])        if r.get("tokens")   is not None else "-"
-        print(_fmt_row(r["module"], status, cov, iters, tokens))
+        print(_fmt_row(r["module"], status, tests, cov, iters, tokens))
         if r["status"] == "success":
             pass_count += 1
+        if r.get("tests") is not None:
+            total_tests  += r["tests"]
         if r.get("iters") is not None:
             total_iters  += r["iters"]
         if r.get("tokens") is not None:
@@ -81,7 +88,7 @@ def _print_summary(
     print(sep)
     n = len(rows)
     avg_cov = f"{sum(cov_values) / len(cov_values):.1f}% avg" if cov_values else "-"
-    print(_fmt_row("TOTAL", f"{pass_count}/{n} pass", avg_cov,
+    print(_fmt_row("TOTAL", f"{pass_count}/{n} pass", str(total_tests), avg_cov,
                    str(total_iters), str(total_tokens)))
     if budget_hit:
         print("\n  (budget hit -- run halted early)")
@@ -170,6 +177,7 @@ def _run_directory(root: Path, args: argparse.Namespace) -> int:
             rows.append({
                 "module":   dotted,
                 "status":   loop.outcome,
+                "tests":    loop.result.total,
                 "coverage": loop.result.coverage,
                 "iters":    loop.iterations,
                 "tokens":   mod_in + mod_out,
@@ -179,10 +187,13 @@ def _run_directory(root: Path, args: argparse.Namespace) -> int:
             if loop.outcome == "bug_found":
                 print(f"  !! source bug: {loop.bug_reason}")
                 print(f"     failing test kept in {out_file}")
+            elif loop.outcome == "regressed":
+                print(f"  !! stopped: model repeatedly deleted tests to avoid failures")
         except Exception as exc:
             rows.append({
                 "module":   dotted,
                 "status":   "error",
+                "tests":    None,
                 "coverage": None,
                 "iters":    None,
                 "tokens":   None,
@@ -232,16 +243,18 @@ def _run_single_file(target: Path, args: argparse.Namespace) -> int:
     out.write_text(loop.tests, encoding="utf-8")
 
     status = {"success": "SUCCESS", "bug_found": "BUG FOUND",
-              "incomplete": "INCOMPLETE"}[loop.outcome]
+              "incomplete": "INCOMPLETE", "regressed": "REGRESSED"}[loop.outcome]
     print(f"\n{status} after {loop.iterations} iteration(s)")
     if loop.outcome == "bug_found":
         print(f"  source bug: {loop.bug_reason}")
         print(f"  the failing test is kept in {out}, marked with # SOURCE BUG")
+    elif loop.outcome == "regressed":
+        print(f"  stopped: model repeatedly deleted tests to avoid failures")
     print(f"  {loop.result.passed} passed, {loop.result.failed} failed, "
-          f"{loop.result.coverage}% coverage")
+          f"{loop.result.coverage}% coverage  ({loop.result.total} tests)")
     print(f"  tokens: {llm.input_tokens} in / {llm.output_tokens} out")
     print(f"  tests written to {out}")
-    return {"success": 0, "bug_found": 2, "incomplete": 1}[loop.outcome]
+    return {"success": 0, "bug_found": 2, "incomplete": 1, "regressed": 1}[loop.outcome]
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/AlimMak/testloop/actions/workflows/ci.yml/badge.svg)](https://github.com/AlimMak/testloop/actions)
 
-![demo](assets/demo.gif)
+![demo](assets/demo/.gif)
 
 A closed-loop test generation agent. Point it at a Python file; it writes a
 pytest suite, runs it in an isolated sandbox, reads the failures and coverage

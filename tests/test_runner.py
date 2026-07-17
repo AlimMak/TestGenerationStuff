@@ -197,6 +197,20 @@ def test_all_passed_property(kwargs, expected):
     assert result.all_passed is expected
 
 
+# ─── RunResult.total property ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("passed, failed, errors, expected", [
+    pytest.param(0, 0, 0, 0, id="all_zero"),
+    pytest.param(5, 0, 0, 5, id="only_passed"),
+    pytest.param(0, 3, 0, 3, id="only_failed"),
+    pytest.param(0, 0, 2, 2, id="only_errors"),
+    pytest.param(4, 3, 1, 8, id="mixed"),
+])
+def test_total_property(passed, failed, errors, expected):
+    result = RunResult(passed=passed, failed=failed, errors=errors)
+    assert result.total == expected
+
+
 # ─── RunResult.collection_error property ─────────────────────────────────────
 
 @pytest.mark.parametrize("kwargs, expected", [
