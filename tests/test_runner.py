@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from testloop.runner import RunResult, _collect, _parse_junit
+from testloop.runner import RunResult, _collect, _filter_output, _parse_junit
 
 
 # ─── XML fixtures ─────────────────────────────────────────────────────────────
@@ -252,3 +252,56 @@ def test_total_property(passed, failed, errors, expected):
 def test_collection_error_property(kwargs, expected):
     result = RunResult(**kwargs)
     assert result.collection_error is expected
+
+
+# ─── _filter_output ───────────────────────────────────────────────────────────
+
+def test_filter_output_removes_coverage_warning_lines():
+    raw = "test session starts\nCoverageWarning: no data was collected\nshort test summary\n"
+    filtered = _filter_output(raw)
+    assert "CoverageWarning" not in filtered
+    assert "test session starts" in filtered
+    assert "short test summary" in filtered
+
+
+def test_filter_output_removes_cov_report_warning_lines():
+    raw = "ImportError: No module named 'foo'\nCovReportWarning: something happened\n"
+    filtered = _filter_output(raw)
+    assert "CovReportWarning" not in filtered
+    assert "ImportError" in filtered
+
+
+def test_filter_output_removes_no_data_to_report_lines():
+    raw = "collected 0 items / 1 error\nNo data to report.\nsome other line\n"
+    filtered = _filter_output(raw)
+    assert "No data to report" not in filtered
+    assert "some other line" in filtered
+
+
+def test_filter_output_preserves_real_error_content():
+    real_error = (
+        "ImportError: No module named 'natsort'\n"
+        "  File 'test_target.py', line 1, in <module>\n"
+        "    import natsort\n"
+    )
+    assert _filter_output(real_error) == real_error
+
+
+def test_filter_output_empty_string():
+    assert _filter_output("") == ""
+
+
+def test_collect_strips_coverage_noise_from_output(tmp_path):
+    """_collect must filter CoverageWarning / No data to report before storing output."""
+    _write_junit(tmp_path, ALL_PASS_XML)
+    noisy = (
+        "ImportError: No module named 'foo'\n"
+        "CoverageWarning: no data was collected\n"
+        "No data to report.\n"
+        "CovReportWarning: couldnt combine data\n"
+    )
+    result = _collect(str(tmp_path), noisy)
+    assert "CoverageWarning" not in result.output
+    assert "No data to report" not in result.output
+    assert "CovReportWarning" not in result.output
+    assert "ImportError" in result.output

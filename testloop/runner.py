@@ -105,9 +105,28 @@ def _parse_junit(path: str) -> tuple[int, int, int, bool]:
     return tests - failures - errors - skipped, failures, errors, tests > 0
 
 
+# Lines matching any of these patterns are stripped from pytest output before
+# it is stored in RunResult.  They flood collection-error messages and obscure
+# the real ImportError or SyntaxError that caused the failure.
+_COVERAGE_NOISE = (
+    "CoverageWarning",
+    "CovReportWarning",
+    "No data to report",
+)
+
+
+def _filter_output(output: str) -> str:
+    """Remove pytest-cov noise lines that hide real error messages."""
+    lines = output.splitlines(keepends=True)
+    return "".join(
+        line for line in lines
+        if not any(pattern in line for pattern in _COVERAGE_NOISE)
+    )
+
+
 def _collect(workdir: str, output: str, module_dotted: str = "target") -> RunResult:
     """Build a RunResult from the report files pytest left in workdir."""
-    result = RunResult(output=output[-6000:])
+    result = RunResult(output=_filter_output(output)[-6000:])
 
     junit = os.path.join(workdir, "results.xml")
     if os.path.exists(junit):

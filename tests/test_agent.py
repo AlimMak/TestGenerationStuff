@@ -9,7 +9,7 @@ import pytest
 
 import testloop.llm as llm_module
 from testloop.agent import LoopResult, _extract_bug, _suite_score, generate_tests
-from testloop.llm import LLM
+from testloop.llm import LLM, TruncatedResponseError
 from testloop.runner import RunResult
 
 
@@ -597,3 +597,58 @@ def test_extract_bug_non_marker_first_line_does_not_match():
     reason, code = _extract_bug(text)
     # The marker appears on the second real line — it must NOT be recognised.
     assert reason is None
+
+
+# ─── Truncated response handling ──────────────────────────────────────────────
+
+def test_truncated_at_iter1_returns_truncated_outcome():
+    """A truncation on the very first LLM call produces outcome='truncated'."""
+    llm = _llm([STUB_TESTS])
+    with patch.object(llm, "complete", side_effect=TruncatedResponseError("partial", 8192)):
+        loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+    assert loop.outcome == "truncated"
+    assert loop.iterations == 1
+
+
+def test_truncated_response_does_not_call_run_tests():
+    """A truncated LLM response must never be fed to pytest."""
+    llm = _llm([STUB_TESTS])
+    with patch("testloop.agent.run_tests") as mock_run:
+        with patch.object(llm, "complete", side_effect=TruncatedResponseError("partial", 8192)):
+            generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+    mock_run.assert_not_called()
+
+
+def test_truncated_emits_truncated_event():
+    """A 'truncated' on_event event is fired when the LLM response is cut off."""
+    events: list[str] = []
+    llm = _llm([STUB_TESTS])
+    with patch.object(llm, "complete", side_effect=TruncatedResponseError("partial", 8192)):
+        generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5,
+                       on_event=lambda kind, i, msg: events.append(kind))
+    assert "truncated" in events
+
+
+def test_truncated_at_iter2_returns_best_suite():
+    """If iter 1 produces a valid (if failing) run and iter 2 truncates, the
+    best-seen suite is returned — not the partial garbage from the truncated call."""
+    call_count = 0
+
+    def _complete_spy(system: str, user: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return STUB_TESTS
+        raise TruncatedResponseError("partial code…", 8192)
+
+    llm = _llm([STUB_TESTS])
+    with patch("testloop.agent.run_tests", return_value=FAILING):
+        with patch.object(llm, "complete", side_effect=_complete_spy):
+            loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+
+    assert loop.outcome == "truncated"
+    assert loop.iterations == 2
+    # The spy returns STUB_TESTS directly (bypassing _strip_fences inside complete),
+    # so the trailing newline is preserved in the stored best_tests.
+    assert loop.tests == STUB_TESTS
+    assert loop.result is FAILING

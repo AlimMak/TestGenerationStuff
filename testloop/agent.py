@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import prompts
-from .llm import LLM, _strip_fences
+from .llm import LLM, TruncatedResponseError, _strip_fences
 from .runner import RunResult, run_tests
 
 BUG_MARKER = "TESTLOOP_SOURCE_BUG:"
@@ -28,7 +28,7 @@ class LoopResult:
     tests: str
     result: RunResult
     iterations: int
-    outcome: str                 # "success" | "bug_found" | "incomplete" | "regressed"
+    outcome: str   # "success" | "bug_found" | "incomplete" | "regressed" | "truncated"
     input_tokens: int
     output_tokens: int
     bug_reason: str | None = None
@@ -135,46 +135,59 @@ def generate_tests(
         bug_reason = None
         import_contract = prompts._import_contract(module_dotted)
 
-        if i == 1:
-            on_event("act", i, "generating initial tests")
-            tests = llm.complete(
-                prompts.GENERATE_SYSTEM.format(import_contract=import_contract),
-                prompts.GENERATE_USER.format(source=source, module_dotted=module_dotted),
-            )
-        else:
-            on_event("act", i, "repairing tests")
-            # Determine what output and context to pass to the repair prompt.
-            # Priority: regression note > collection error > normal output.
-            # On regression we show the previous (non-regressed) run's output so
-            # the context is consistent with the reverted test file.
-            if regression_note:
-                repair_ctx = prev_result
-                repair_output = regression_note + "\n" + prev_result.output
-            elif result.collection_error:
-                repair_ctx = result
-                repair_output = (
-                    "[COLLECTION ERROR — pytest could not import the test module. "
-                    "No tests ran. The import statements are wrong; fix them first.]\n"
-                    + result.output
+        try:
+            if i == 1:
+                on_event("act", i, "generating initial tests")
+                tests = llm.complete(
+                    prompts.GENERATE_SYSTEM.format(import_contract=import_contract),
+                    prompts.GENERATE_USER.format(source=source, module_dotted=module_dotted),
                 )
             else:
-                repair_ctx = result
-                repair_output = result.output
+                on_event("act", i, "repairing tests")
+                # Determine what output and context to pass to the repair prompt.
+                # Priority: regression note > collection error > normal output.
+                # On regression we show the previous (non-regressed) run's output so
+                # the context is consistent with the reverted test file.
+                if regression_note:
+                    repair_ctx = prev_result
+                    repair_output = regression_note + "\n" + prev_result.output
+                elif result.collection_error:
+                    repair_ctx = result
+                    repair_output = (
+                        "[COLLECTION ERROR — pytest could not import the test module. "
+                        "No tests ran. The import statements are wrong; fix them first.]\n"
+                        + result.output
+                    )
+                else:
+                    repair_ctx = result
+                    repair_output = result.output
 
-            raw = llm.complete(
-                prompts.REPAIR_SYSTEM.format(import_contract=import_contract),
-                prompts.REPAIR_USER.format(
-                    source=source,
-                    module_dotted=module_dotted,
-                    tests=tests,
-                    output=repair_output,
-                    coverage=repair_ctx.coverage,
-                    target=coverage_target,
-                    uncovered=repair_ctx.uncovered_lines,
-                ),
+                raw = llm.complete(
+                    prompts.REPAIR_SYSTEM.format(import_contract=import_contract),
+                    prompts.REPAIR_USER.format(
+                        source=source,
+                        module_dotted=module_dotted,
+                        tests=tests,
+                        output=repair_output,
+                        coverage=repair_ctx.coverage,
+                        target=coverage_target,
+                        uncovered=repair_ctx.uncovered_lines,
+                    ),
+                )
+                bug_reason, tests = _extract_bug(raw)
+                tests = _strip_fences(tests)  # mirror the generate path
+        except TruncatedResponseError as exc:
+            on_event(
+                "truncated", i,
+                f"response cut off at {exc.output_tokens} output tokens — "
+                f"raise --max-tokens (current: {llm.max_tokens})",
             )
-            bug_reason, tests = _extract_bug(raw)
-            tests = _strip_fences(tests)  # mirror the generate path
+            return LoopResult(
+                best_tests if best_result is not None else "",
+                best_result if best_result is not None else result,
+                i, "truncated",
+                llm.input_tokens, llm.output_tokens,
+            )
 
         result = run_tests(
             source, tests,

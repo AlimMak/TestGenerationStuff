@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from .agent import generate_tests
-from .llm import LLM
+from .llm import DEFAULT_MAX_TOKENS, LLM
 
 
 def _print_event(kind: str, i: int, msg: str) -> None:
@@ -22,7 +22,7 @@ def _print_event(kind: str, i: int, msg: str) -> None:
         for line in lines[-20:]:
             print(f"       {line}")
         return
-    tag = {"act": "->", "observe": "..", "done": "**", "bug": "!!", "regress": "!!"}.get(kind, "  ")
+    tag = {"act": "->", "observe": "..", "done": "**", "bug": "!!", "regress": "!!", "truncated": "!!"}.get(kind, "  ")
     print(f"  [iter {i}] {tag} {msg}")
 
 
@@ -40,6 +40,7 @@ _STATUS_LABELS = {
     "bug_found":  "BUG FOUND",
     "incomplete": "INCOMPLETE",
     "regressed":  "REGRESSED",
+    "truncated":  "TRUNCATED",
     "skipped":    "SKIPPED",
     "error":      "ERROR",
 }
@@ -145,7 +146,7 @@ def _run_directory(root: Path, args: argparse.Namespace) -> int:
     # Collect all source files relative to the import root so the sandbox
     # workdir gets the full package tree (e.g. mypkg/__init__.py, mypkg/utils.py).
     pkg_files = collect_package_files(import_root)
-    llm = LLM(mock=args.mock, model=args.model)
+    llm = LLM(mock=args.mock, model=args.model, max_tokens=args.max_tokens)
 
     # --out-dir overrides default placement; absent means "next to each source file".
     out_dir: Path | None = Path(args.out_dir) if args.out_dir else None
@@ -198,6 +199,8 @@ def _run_directory(root: Path, args: argparse.Namespace) -> int:
                 print(f"     failing test kept in {out_file}")
             elif loop.outcome == "regressed":
                 print(f"  !! stopped: model repeatedly deleted tests to avoid failures")
+            elif loop.outcome == "truncated":
+                print(f"  !! LLM response truncated — raise --max-tokens (current: {args.max_tokens})")
         except Exception as exc:
             rows.append({
                 "module":   dotted,
@@ -251,7 +254,7 @@ def _run_single_file(target: Path, args: argparse.Namespace) -> int:
     sandbox = "docker" if args.docker else "local subprocess"
     print(f"testloop: {target}  (target {args.coverage}% cov, "
           f"max {args.max_iters} iters, sandbox: {sandbox})")
-    llm = LLM(mock=args.mock, model=args.model)
+    llm = LLM(mock=args.mock, model=args.model, max_tokens=args.max_tokens)
     loop = generate_tests(
         source, llm,
         coverage_target=args.coverage,
@@ -263,19 +266,25 @@ def _run_single_file(target: Path, args: argparse.Namespace) -> int:
 
     out.write_text(loop.tests, encoding="utf-8")
 
-    status = {"success": "SUCCESS", "bug_found": "BUG FOUND",
-              "incomplete": "INCOMPLETE", "regressed": "REGRESSED"}[loop.outcome]
+    status = {
+        "success": "SUCCESS", "bug_found": "BUG FOUND",
+        "incomplete": "INCOMPLETE", "regressed": "REGRESSED",
+        "truncated": "TRUNCATED",
+    }[loop.outcome]
     print(f"\n{status} after {loop.iterations} iteration(s)")
     if loop.outcome == "bug_found":
         print(f"  source bug: {loop.bug_reason}")
         print(f"  the failing test is kept in {out}, marked with # SOURCE BUG")
     elif loop.outcome == "regressed":
         print(f"  stopped: model repeatedly deleted tests to avoid failures")
+    elif loop.outcome == "truncated":
+        print(f"  LLM response truncated — raise --max-tokens (current: {args.max_tokens})")
     print(f"  {loop.result.passed} passed, {loop.result.failed} failed, "
           f"{loop.result.coverage}% coverage  ({loop.result.total} tests)")
     print(f"  tokens: {llm.input_tokens} in / {llm.output_tokens} out")
     print(f"  tests written to {out}")
-    return {"success": 0, "bug_found": 2, "incomplete": 1, "regressed": 1}[loop.outcome]
+    return {"success": 0, "bug_found": 2, "incomplete": 1, "regressed": 1,
+            "truncated": 1}[loop.outcome]
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
@@ -298,6 +307,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="directory mode: write all generated tests into DIR "
                         "(default: next to each source module)")
     p.add_argument("--model", default="claude-sonnet-5")
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, metavar="N",
+                   help=f"max output tokens per LLM call (default {DEFAULT_MAX_TOKENS}); "
+                        f"raise this if generation is truncated mid-file")
     p.add_argument("--docker", action="store_true",
                    help="run generated tests in an isolated container "
                         "(no network, capped memory/pids)")

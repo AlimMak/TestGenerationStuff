@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from testloop.llm import DEFAULT_MODEL, LLM, _strip_fences
+from testloop.llm import DEFAULT_MODEL, DEFAULT_MAX_TOKENS, LLM, TruncatedResponseError, _strip_fences
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -18,6 +18,7 @@ def _fake_llm() -> LLM:
     llm = LLM.__new__(LLM)
     llm.mock = False
     llm.model = DEFAULT_MODEL
+    llm.max_tokens = DEFAULT_MAX_TOKENS
     llm.input_tokens = 0
     llm.output_tokens = 0
     llm._client = MagicMock()
@@ -29,9 +30,11 @@ def _make_block(type_: str, **kwargs) -> types.SimpleNamespace:
     return types.SimpleNamespace(type=type_, **kwargs)
 
 
-def _fake_response(blocks, *, input_tokens=10, output_tokens=5):
+def _fake_response(blocks, *, input_tokens=10, output_tokens=5,
+                   stop_reason="end_turn"):
     return types.SimpleNamespace(
         content=blocks,
+        stop_reason=stop_reason,
         usage=types.SimpleNamespace(input_tokens=input_tokens,
                                     output_tokens=output_tokens),
     )
@@ -195,3 +198,64 @@ def test_mock_mode_returns_default_when_queue_empty(monkeypatch):
     llm.output_tokens = 0
     # _strip_fences strips trailing whitespace, so the fallback arrives without \n
     assert llm.complete("s", "u") == "import target"
+
+
+# ─── stop_reason / TruncatedResponseError ────────────────────────────────────
+
+def test_end_turn_returns_normally():
+    """stop_reason='end_turn' (normal) must return the stripped text as usual."""
+    llm = _fake_llm()
+    llm._client.messages.create.return_value = _fake_response(
+        [_make_block("text", text="import target\n")],
+        stop_reason="end_turn",
+    )
+    assert llm.complete("sys", "user") == "import target"
+
+
+def test_max_tokens_raises_truncated_error():
+    """stop_reason='max_tokens' must raise TruncatedResponseError, never return text."""
+    llm = _fake_llm()
+    partial = "import target\ndef test_foo():\n    # response was cut off here"
+    llm._client.messages.create.return_value = _fake_response(
+        [_make_block("text", text=partial)],
+        stop_reason="max_tokens",
+        output_tokens=8192,
+    )
+    with pytest.raises(TruncatedResponseError) as exc_info:
+        llm.complete("sys", "user")
+    assert exc_info.value.partial == partial
+    assert exc_info.value.output_tokens == 8192
+
+
+def test_truncated_error_tokens_are_already_accounted():
+    """Token counts must be updated even when TruncatedResponseError is raised,
+    so budget tracking reflects the actual cost of the aborted call."""
+    llm = _fake_llm()
+    llm._client.messages.create.return_value = _fake_response(
+        [_make_block("text", text="partial")],
+        stop_reason="max_tokens",
+        input_tokens=500,
+        output_tokens=8192,
+    )
+    with pytest.raises(TruncatedResponseError):
+        llm.complete("sys", "user")
+    assert llm.input_tokens == 500
+    assert llm.output_tokens == 8192
+
+
+def test_default_max_tokens_is_8192():
+    """DEFAULT_MAX_TOKENS must be at least 8 192 to handle real-world test files."""
+    assert DEFAULT_MAX_TOKENS >= 8192
+
+
+def test_llm_constructor_accepts_max_tokens():
+    """LLM stores max_tokens and passes it to the API call."""
+    llm = _fake_llm()
+    llm.max_tokens = 16384
+    llm._client.messages.create.return_value = _fake_response(
+        [_make_block("text", text="import target")],
+        stop_reason="end_turn",
+    )
+    llm.complete("sys", "user")
+    call_kwargs = llm._client.messages.create.call_args
+    assert call_kwargs.kwargs["max_tokens"] == 16384

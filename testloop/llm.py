@@ -9,6 +9,25 @@ from __future__ import annotations
 import re
 
 DEFAULT_MODEL = "claude-sonnet-5"
+DEFAULT_MAX_TOKENS = 8192   # raised from 4096; complex modules need more room
+
+
+class TruncatedResponseError(Exception):
+    """Raised when the API stops early because the output token cap was reached.
+
+    The response is incomplete and must NOT be used as-is: feeding truncated
+    Python to pytest will produce a SyntaxError on the last line.  The caller
+    should surface this as a distinct TRUNCATED outcome and advise the user to
+    raise --max-tokens.
+    """
+
+    def __init__(self, partial: str, output_tokens: int) -> None:
+        super().__init__(
+            f"LLM response truncated at {output_tokens} output tokens "
+            f"(stop_reason='max_tokens')"
+        )
+        self.partial = partial
+        self.output_tokens = output_tokens
 
 
 def _strip_fences(text: str) -> str:
@@ -18,9 +37,15 @@ def _strip_fences(text: str) -> str:
 
 
 class LLM:
-    def __init__(self, mock: bool = False, model: str = DEFAULT_MODEL):
+    def __init__(
+        self,
+        mock: bool = False,
+        model: str = DEFAULT_MODEL,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ):
         self.mock = mock
         self.model = model
+        self.max_tokens = max_tokens
         self.input_tokens = 0
         self.output_tokens = 0
         self._client = None
@@ -37,7 +62,7 @@ class LLM:
             return _strip_fences(text)
         resp = self._client.messages.create(
             model=self.model,
-            max_tokens=4096,
+            max_tokens=self.max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
@@ -48,6 +73,10 @@ class LLM:
         text = "\n".join(
             b.text for b in resp.content if getattr(b, "type", None) == "text"
         )
+        # Incomplete responses must not silently corrupt the generated file.
+        if resp.stop_reason == "max_tokens":
+            raise TruncatedResponseError(partial=text,
+                                         output_tokens=resp.usage.output_tokens)
         return _strip_fences(text)
 
 
