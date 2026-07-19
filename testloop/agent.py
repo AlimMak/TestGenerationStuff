@@ -23,6 +23,30 @@ from .runner import RunResult, run_tests
 BUG_MARKER = "TESTLOOP_SOURCE_BUG:"
 
 
+def _call_with_retry(
+    llm: LLM,
+    system: str,
+    user: str,
+    on_event,
+    iteration: int,
+) -> str:
+    """Call llm.complete; on the first truncation retry once at 2× the token cap.
+
+    If the doubled cap still truncates, the ``TruncatedResponseError`` from the
+    retry propagates to the caller so it can surface a TRUNCATED outcome.
+    Tokens from both attempts are counted in ``llm.output_tokens``.
+    """
+    try:
+        return llm.complete(system, user)
+    except TruncatedResponseError as exc:
+        retry_cap = llm.max_tokens * 2
+        on_event(
+            "act", iteration,
+            f"truncated at {exc.output_tokens} tokens; retrying at {retry_cap}",
+        )
+        return llm.complete(system, user, max_tokens=retry_cap)
+
+
 @dataclass
 class LoopResult:
     tests: str
@@ -138,9 +162,11 @@ def generate_tests(
         try:
             if i == 1:
                 on_event("act", i, "generating initial tests")
-                tests = llm.complete(
+                tests = _call_with_retry(
+                    llm,
                     prompts.GENERATE_SYSTEM.format(import_contract=import_contract),
                     prompts.GENERATE_USER.format(source=source, module_dotted=module_dotted),
+                    on_event, i,
                 )
             else:
                 on_event("act", i, "repairing tests")
@@ -162,7 +188,8 @@ def generate_tests(
                     repair_ctx = result
                     repair_output = result.output
 
-                raw = llm.complete(
+                raw = _call_with_retry(
+                    llm,
                     prompts.REPAIR_SYSTEM.format(import_contract=import_contract),
                     prompts.REPAIR_USER.format(
                         source=source,
@@ -173,14 +200,15 @@ def generate_tests(
                         target=coverage_target,
                         uncovered=repair_ctx.uncovered_lines,
                     ),
+                    on_event, i,
                 )
                 bug_reason, tests = _extract_bug(raw)
                 tests = _strip_fences(tests)  # mirror the generate path
         except TruncatedResponseError as exc:
             on_event(
                 "truncated", i,
-                f"response cut off at {exc.output_tokens} output tokens — "
-                f"raise --max-tokens (current: {llm.max_tokens})",
+                f"response still cut off at {exc.output_tokens} tokens even after "
+                f"doubling the cap — raise --max-tokens above {exc.output_tokens}",
             )
             return LoopResult(
                 best_tests if best_result is not None else "",

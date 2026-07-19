@@ -600,46 +600,58 @@ def test_extract_bug_non_marker_first_line_does_not_match():
 
 
 # ─── Truncated response handling ──────────────────────────────────────────────
+#
+# The retry path: the first truncation triggers one automatic retry at 2× the
+# cap.  Only when BOTH attempts truncate does the loop return outcome='truncated'.
 
 def test_truncated_at_iter1_returns_truncated_outcome():
-    """A truncation on the very first LLM call produces outcome='truncated'."""
+    """Both the initial call and its retry must truncate for outcome='truncated'."""
     llm = _llm([STUB_TESTS])
-    with patch.object(llm, "complete", side_effect=TruncatedResponseError("partial", 8192)):
+    with patch.object(llm, "complete", side_effect=[
+        TruncatedResponseError("partial", 8192),
+        TruncatedResponseError("partial", 16384),
+    ]):
         loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
     assert loop.outcome == "truncated"
     assert loop.iterations == 1
 
 
 def test_truncated_response_does_not_call_run_tests():
-    """A truncated LLM response must never be fed to pytest."""
+    """run_tests must not be called when both the initial call and its retry truncate."""
     llm = _llm([STUB_TESTS])
     with patch("testloop.agent.run_tests") as mock_run:
-        with patch.object(llm, "complete", side_effect=TruncatedResponseError("partial", 8192)):
+        with patch.object(llm, "complete", side_effect=[
+            TruncatedResponseError("partial", 8192),
+            TruncatedResponseError("partial", 16384),
+        ]):
             generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
     mock_run.assert_not_called()
 
 
 def test_truncated_emits_truncated_event():
-    """A 'truncated' on_event event is fired when the LLM response is cut off."""
+    """A 'truncated' event is fired only when both the call and its retry truncate."""
     events: list[str] = []
     llm = _llm([STUB_TESTS])
-    with patch.object(llm, "complete", side_effect=TruncatedResponseError("partial", 8192)):
+    with patch.object(llm, "complete", side_effect=[
+        TruncatedResponseError("partial", 8192),
+        TruncatedResponseError("partial", 16384),
+    ]):
         generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5,
                        on_event=lambda kind, i, msg: events.append(kind))
     assert "truncated" in events
 
 
 def test_truncated_at_iter2_returns_best_suite():
-    """If iter 1 produces a valid (if failing) run and iter 2 truncates, the
+    """If iter 1 produces a valid run and iter 2 truncates on both attempts, the
     best-seen suite is returned — not the partial garbage from the truncated call."""
     call_count = 0
 
-    def _complete_spy(system: str, user: str) -> str:
+    def _complete_spy(system: str, user: str, **kwargs) -> str:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             return STUB_TESTS
-        raise TruncatedResponseError("partial code…", 8192)
+        raise TruncatedResponseError("partial code…", 8192 * call_count)
 
     llm = _llm([STUB_TESTS])
     with patch("testloop.agent.run_tests", return_value=FAILING):
@@ -647,8 +659,43 @@ def test_truncated_at_iter2_returns_best_suite():
             loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
 
     assert loop.outcome == "truncated"
+    assert call_count == 3  # iter1 ok, iter2 truncated, iter2 retry truncated
     assert loop.iterations == 2
     # The spy returns STUB_TESTS directly (bypassing _strip_fences inside complete),
     # so the trailing newline is preserved in the stored best_tests.
     assert loop.tests == STUB_TESTS
     assert loop.result is FAILING
+
+
+def test_truncated_retry_emits_act_event():
+    """When the first call truncates, a retry 'act' event is emitted before retrying."""
+    events: list[tuple[str, str]] = []
+    llm = _llm([STUB_TESTS])
+    with patch.object(llm, "complete", side_effect=[
+        TruncatedResponseError("partial", 8192),
+        TruncatedResponseError("partial", 16384),
+    ]):
+        generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5,
+                       on_event=lambda kind, i, msg: events.append((kind, msg)))
+    act_msgs = [msg for kind, msg in events if kind == "act"]
+    assert any("retry" in msg or "retrying" in msg for msg in act_msgs)
+
+
+def test_truncated_retry_success_continues_loop():
+    """If the first call truncates but the retry succeeds, the loop continues normally."""
+    call_count = 0
+
+    def _complete_spy(system: str, user: str, **kwargs) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise TruncatedResponseError("partial", 8192)
+        return STUB_TESTS  # retry succeeds
+
+    llm = _llm([STUB_TESTS])
+    with patch("testloop.agent.run_tests", return_value=PASSING):
+        with patch.object(llm, "complete", side_effect=_complete_spy):
+            loop = generate_tests(SOURCE, llm, coverage_target=80.0, max_iterations=5)
+
+    assert loop.outcome == "success"  # loop continued after successful retry
+    assert call_count == 2           # initial truncated + retry succeeded

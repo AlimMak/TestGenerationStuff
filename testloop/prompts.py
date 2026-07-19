@@ -65,12 +65,16 @@ Output rules (strict):
   Deleting or skipping tests to reduce the failure count is not acceptable.
 
 Source bug handling:
-- If a test fails because the SOURCE CODE under test is genuinely wrong (its
-  behavior is incorrect, not the test), do NOT change the test to accept the
-  wrong behavior. Instead make the FIRST line of your reply exactly:
-      TESTLOOP_SOURCE_BUG: <one sentence naming the bug and the correct behavior>
-  Then, on the following lines, output the full test file, keeping the correct
-  (failing) assertion with a `# SOURCE BUG:` comment on the line above it.
+- If a failing test exists because the SOURCE CODE is genuinely wrong, do NOT
+  weaken the assertion to match the wrong behavior.
+- SIGNAL THE BUG: your reply MUST begin with this marker as its very first line
+  — no blank lines or other text before it:
+      TESTLOOP_SOURCE_BUG: <one sentence naming the exact bug, the incorrect behavior, and the correct behavior>
+  Example: TESTLOOP_SOURCE_BUG: int(value * factor + 0.5) uses integer truncation instead of round(), returning 2 for 2.5
+  A `# SOURCE BUG` comment inside the test file is NOT sufficient on its own —
+  the TESTLOOP_SOURCE_BUG marker on line 1 is required to surface the diagnosis.
+- After the marker, output the full updated test file with the failing assertion
+  kept intact and annotated `# SOURCE BUG:` on the line above it.
 """
 
 REPAIR_USER = """\

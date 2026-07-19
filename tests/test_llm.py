@@ -243,19 +243,34 @@ def test_truncated_error_tokens_are_already_accounted():
     assert llm.output_tokens == 8192
 
 
-def test_default_max_tokens_is_8192():
-    """DEFAULT_MAX_TOKENS must be at least 8 192 to handle real-world test files."""
-    assert DEFAULT_MAX_TOKENS >= 8192
+def test_default_max_tokens_is_at_least_16384():
+    """DEFAULT_MAX_TOKENS must be >= 16 384 — the value needed for a full natsort run."""
+    assert DEFAULT_MAX_TOKENS >= 16384
 
 
 def test_llm_constructor_accepts_max_tokens():
     """LLM stores max_tokens and passes it to the API call."""
     llm = _fake_llm()
-    llm.max_tokens = 16384
+    llm.max_tokens = 32768  # non-default value
     llm._client.messages.create.return_value = _fake_response(
         [_make_block("text", text="import target")],
         stop_reason="end_turn",
     )
     llm.complete("sys", "user")
     call_kwargs = llm._client.messages.create.call_args
-    assert call_kwargs.kwargs["max_tokens"] == 16384
+    assert call_kwargs.kwargs["max_tokens"] == 32768
+
+
+def test_complete_max_tokens_override():
+    """Passing max_tokens to complete() overrides self.max_tokens for that call only."""
+    llm = _fake_llm()
+    llm.max_tokens = 8192  # self.max_tokens is lower
+    llm._client.messages.create.return_value = _fake_response(
+        [_make_block("text", text="import target")],
+        stop_reason="end_turn",
+    )
+    llm.complete("sys", "user", max_tokens=32768)
+    call_kwargs = llm._client.messages.create.call_args
+    assert call_kwargs.kwargs["max_tokens"] == 32768
+    # self.max_tokens must be unchanged
+    assert llm.max_tokens == 8192

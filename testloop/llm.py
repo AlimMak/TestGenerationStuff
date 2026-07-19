@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 DEFAULT_MODEL = "claude-sonnet-5"
-DEFAULT_MAX_TOKENS = 8192   # raised from 4096; complex modules need more room
+DEFAULT_MAX_TOKENS = 16384  # raised from 4096; full natsort run completes with headroom
 
 
 class TruncatedResponseError(Exception):
@@ -56,13 +56,23 @@ class LLM:
             from anthropic import Anthropic  # imported lazily so mock runs need no key
             self._client = Anthropic()
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, *, max_tokens: int | None = None) -> str:
+        """Generate a completion.
+
+        Parameters
+        ----------
+        max_tokens:
+            Override ``self.max_tokens`` for this call only.  Used by the
+            retry-on-truncation path in ``agent.py`` to double the cap without
+            permanently changing the LLM configuration.
+        """
         if self.mock:
             text = _MOCK.pop(0) if _MOCK else "import target\n"
             return _strip_fences(text)
+        effective_max = max_tokens if max_tokens is not None else self.max_tokens
         resp = self._client.messages.create(
             model=self.model,
-            max_tokens=self.max_tokens,
+            max_tokens=effective_max,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
